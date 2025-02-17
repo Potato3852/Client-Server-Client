@@ -3,6 +3,7 @@
 #include <thread>
 #include <mutex>
 #include <memory>
+#include <set>
 
 #define MAX_CONNECTIONS 100
 using namespace std;
@@ -10,9 +11,12 @@ using namespace std;
 SOCKET Connections[MAX_CONNECTIONS];                 // Массив для хранения подключений
 int Counter = 0;                                      // Индекс подключений
 mutex ConnectionMutex;                                // Мьютекс для защиты общих ресурсов
+set<string> Logins;                                   // Множество для хранения уникальных логинов
 
 enum Packet {
-    P_ChatMessageAll,
+    P_ChatMessageAll,                                 // Для широковещательных сообщений
+    P_LoginTaken,                                     // Для уведомления о занятом логине
+    P_ServerMessage                                   // Для серверных уведомлений
 };
 
 bool ProcessPacket(int index, Packet packettype) {
@@ -118,10 +122,42 @@ int main(int argc, char* argv[]) {
         if (newConnection == INVALID_SOCKET) {
             cout << "Error accepting new connection" << endl;
         } else {
-            cout << "Client Connected!" << endl;
+            // Принимаем логин от клиента
+            int login_size;
+            if (recv(newConnection, (char*)&login_size, sizeof(int), NULL) <= 0) {
+                cout << "Error receiving login size from client" << endl;
+                closesocket(newConnection);
+                continue;
+            }
+
+            unique_ptr<char[]> login(new char[login_size + 1]);
+            if (recv(newConnection, login.get(), login_size, NULL) <= 0) {
+                cout << "Error receiving login from client" << endl;
+                closesocket(newConnection);
+                continue;
+            }
+            login[login_size] = '\0';
+
+            // Проверяем уникальность логина
+            ConnectionMutex.lock();
+            if (Logins.find(login.get()) != Logins.end()) {
+                // Логин уже занят
+                Packet msgtype = P_LoginTaken;
+                send(newConnection, (char*)&msgtype, sizeof(Packet), NULL);
+                closesocket(newConnection);
+                ConnectionMutex.unlock();
+                cout << "Client tried to connect with taken login: " << login.get() << endl;
+                continue;
+            } else {
+                // Логин уникален, добавляем его в множество
+                Logins.insert(login.get());
+                ConnectionMutex.unlock();
+            }
+
+            cout << "Client Connected with login: " << login.get() << endl;
             string msg = "###SERVER MESSAGE###: You connected to the server!";
             int msg_size = msg.size();
-            Packet msgtype = P_ChatMessageAll;
+            Packet msgtype = P_ServerMessage;  // Используем новый тип для серверных сообщений
             if (send(newConnection, (char*)&msgtype, sizeof(Packet), NULL) <= 0 ||
                 send(newConnection, (char*)&msg_size, sizeof(int), NULL) <= 0 ||
                 send(newConnection, msg.c_str(), msg_size, NULL) <= 0) {
